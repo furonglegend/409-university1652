@@ -1,0 +1,75 @@
+class ft_net(nn.Module):
+    def __init__(self, class_num, droprate=0.5, stride=2, init_model=None, pool='avg'):
+        super(ft_net, self).__init__()
+        model_ft = models.resnet50(pretrained=True)
+        
+        # 修改步长
+        if stride == 1:
+            model_ft.layer4[0].downsample[0].stride = (1, 1)
+            model_ft.layer4[0].conv2.stride = (1, 1)
+
+        # 池化层配置
+        self.pool = pool
+        if pool == 'avg+max':
+            model_ft.avgpool2 = nn.AdaptiveAvgPool2d((1, 1))
+            model_ft.maxpool2 = nn.AdaptiveMaxPool2d((1, 1))
+            in_dim = 4096
+        elif pool == 'avg':
+            model_ft.avgpool2 = nn.AdaptiveAvgPool2d((1, 1))
+            in_dim = 2048
+        elif pool == 'max':
+            model_ft.maxpool2 = nn.AdaptiveMaxPool2d((1, 1))
+            in_dim = 2048
+        elif pool == 'gem':
+            model_ft.gem2 = GeM(dim=2048)
+            in_dim = 2048
+        
+        self.model = model_ft
+        
+        # 添加分类器
+        self.classifier = ClassBlock(in_dim, class_num, droprate)
+        
+        # 初始化模型
+        if init_model is not None:
+            self.model = init_model.model
+            self.pool = init_model.pool
+            self.classifier = init_model.classifier
+
+    def forward(self, x):
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+        x = self.model.layer1(x)
+        x = self.model.layer2(x)
+        x = self.model.layer3(x)
+        x = self.model.layer4(x)
+        
+        # 池化处理
+        if self.pool == 'avg+max':
+            x1 = self.model.avgpool2(x)
+            x2 = self.model.maxpool2(x)
+            x = torch.cat((x1, x2), dim=1)
+        elif self.pool == 'avg':
+            x = self.model.avgpool2(x)
+        elif self.pool == 'max':
+            x = self.model.maxpool2(x)
+        elif self.pool == 'gem':
+            x = self.model.gem2(x)
+        
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)  # 添加分类器
+        return x
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # 处理DataParallel保存的权重前缀
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('module.'):
+                new_key = key.replace('module.', '')
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+        super()._load_from_state_dict(new_state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
